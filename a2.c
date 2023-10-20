@@ -38,7 +38,8 @@
 // mpicc -lpthread a2.c -o a2.o -lm
 // mpirun -oversubscribe -np 5 a2.o 2 2
 
-
+//Gloable variables 
+// int waitPeriod = 2;
 // structure for node data
 typedef struct {
 	int rank; 
@@ -116,7 +117,10 @@ int main(int argc, char **argv)
     /* get the nrows and ncols */
 	if (argc == 3) {
 		nrows = atoi (argv[1]);
-		ncols = atoi (argv[2]);
+		ncols = atoi (argv[2]); 
+		//scalable waitTime accroding to the number of mpi process has
+		//to safely terminate termiante thread
+		//waitPeriod = atoi (argv[1]);
 		dims[0] = nrows; /* number of rows */
 		dims[1] = ncols; /* number of columns */
 		if( (nrows*ncols) != (size - 1)) {
@@ -163,17 +167,17 @@ int master_io(MPI_Comm world_comm, MPI_Comm comm)
 	//send termination message after 100 seconds
 	for(int i=0; i<2; i++)
 	{
-		sleep(1);
+		sleep(10);
 	}
 
-	fflush(stdout);
+
 	for(int i=0; i<worldSize-1; i++)
 	{
 		//MPI_Send(nearest, 3, MPI_INT, status.MPI_SOURCE, NEATAG, MPI_COMM_WORLD);
 		//MPI_Isend(coord, 2, MPI_INT, worldSize-1, node.rank, MPI_COMM_WORLD, &req[5]);
 		MPI_Send(&term, 1, MPI_INT, i, TEMTAG, MPI_COMM_WORLD);
 		// MPI_Wait(&req, MPI_STATUS_IGNORE);
-		fflush(stdout);
+
 	}
 
 	pthread_join(tid, NULL);
@@ -223,6 +227,7 @@ void* ProcessFunc(void *pArg){
 		}
 	}
 
+
 	//initialise termination meeesge and available nodes for all the processes;
 	//Self-initialise to be -1, do not use constant otherwise error
 	int term = -1;
@@ -235,9 +240,21 @@ void* ProcessFunc(void *pArg){
 	int iteration = 0;
 	int slaCount = 0;
 	int slaFlag = 0;
+	int clearIter = 0;
 	//communicate with charging nodes
 	while(slaCount < (worldSize-1)){
+
+		//clear off available node array per 10 iterations
+		//no receving reports in last 10 iterations
+		if(iteration >= 10){
+			for (int i=0; i<(worldSize-1); i++){
+				avail[i] = 1;
+			}
+			clearIter=0;
+		}
 		iteration++;
+		clearIter++;
+
 
 		//time for communication 
 		double start1, start2, end1, end2;
@@ -256,7 +273,6 @@ void* ProcessFunc(void *pArg){
 			MPI_Recv(&a, 1, MPI_ALERT_T, MPI_ANY_SOURCE, ALETAG, MPI_COMM_WORLD, &status);
 			end1 = MPI_Wtime();
 			//without fflush can not print correctly
-			fflush(stdout);
 			msgCount++;
 
 			//get the buf that store the busy ranks
@@ -268,10 +284,15 @@ void* ProcessFunc(void *pArg){
 				}
 			}
 			
-			
+			//available nearby nodes
+			int ava_nearby[worldSize-1];
+			int ava_count = 0;
+			char avaStr[256];
+			sprintf(avaStr, "%s", "Available station nearby (no reports in last 3 iterations):");
 			int nearbyDisp = 2;
 			int nearest[3];
 			int disp = 100; 
+			//by default itself, to get the nearby nodes from itself by 2 displace
 			int repo_rank = a.nodes[NODES-1];
 			//report rank coordinate
 			int repo_coord[2];
@@ -281,7 +302,8 @@ void* ProcessFunc(void *pArg){
 			for (int j=0; j<g_nslaves; j++)
 			{
 				//if busy nodes not the reporting node 
-				if(avail[j]==1){
+				if(avail[j]==1)
+				{
 					//get the adjacent node of this current neighbour
 					//report rank coordinate
 					int temp_disp;
@@ -291,36 +313,45 @@ void* ProcessFunc(void *pArg){
 					temp_coord[1] = coords[j][1];
 
 					temp_disp = abs(temp_coord[0] - repo_coord[0]) + abs(temp_coord[1] - repo_coord[1]);
-					if (temp_disp < disp){
-						repo_rank = j;
-						repo_coord[0] = temp_coord[0];
-						repo_coord[1] = temp_coord[1];
-					}
+					//to see if there is nearby Node, if yes then append to info
+					if (temp_disp <= nearbyDisp)
+					{
+						nearest[0] = j;
+						nearest[1] = temp_coord[0];
+						nearest[2] = temp_coord[1];
 
-					//Nearby nodes count the rank that has distance <=2
-					if (temp_disp <= nearbyDisp){
+						//apend available node strings into the message
+						char str[256];
+						sprintf(str, " %d", j);
+						strcat(avaStr, str);
 						nearbyCount++;
+					
 					}
+						
+					
 				}
 			}
-			nearest[0] = repo_rank;
-			nearest[1] = repo_coord[0];
-			nearest[2] = repo_coord[1];
-			
+		
+		
+			//Respond alert message
+			char nearbyStr[256];
+			//If there is nearby available node
+			if(nearbyCount>0)
+			{
+				sprintf(nearbyStr, "\nNearby Node: %d coordinates: [%d,%d]", nearest[0], nearest[1],nearest[2]);
+				start2 = MPI_Wtime();
+				MPI_Send(nearbyStr, 256, MPI_CHAR, status.MPI_SOURCE, NEATAG, MPI_COMM_WORLD);
+				end2 = MPI_Wtime();
+			}
+			else
+			{	
+				sprintf(nearbyStr, "\n %s", "No nearby nodes");
+				start2 = MPI_Wtime();
+				MPI_Send(nearbyStr, 256, MPI_CHAR, status.MPI_SOURCE, NEATAG, MPI_COMM_WORLD);
+				end2 = MPI_Wtime();
+			}
 
-			//if there is no vacant node ,send the nearest rank to be node which send alert msg
-			// if(count==g_nslaves){
-			// 	nearest[0]=a.nodes[NODES-1];
-			// }
-			//MPI_Isend(coord, 2, MPI_INT, worldSize-1, rank, MPI_COMM_WORLD, &request);
-			
-			fflush(stdout);
-			//send buffer
-			nearest[1] = coords[nearest[0]][0];
-			nearest[2] = coords[nearest[0]][1];
-			start2 = MPI_Wtime();
-			MPI_Send(nearest, 3, MPI_INT, status.MPI_SOURCE, NEATAG, MPI_COMM_WORLD);
-			end2 = MPI_Wtime();
+
 			msgCount++;
 			alert_count++;
 			//remove itself from the adjacent count
@@ -346,20 +377,24 @@ void* ProcessFunc(void *pArg){
 				}
 			}
 			fprintf(logFile, "\nTotal number of messages sent between reporting nodes and base station: %d", msgCount);
-			fprintf(logFile, "\nNumber of available station nearby: %d", nearbyCount);
+			fprintf(logFile, "\n%s", avaStr);
 			fprintf(logFile, "\nCommunication Time (seconds): %f",tt);
 			fprintf(logFile, "\n------------------------------------------------------------------------------");
 			fclose(logFile);
+
+			alert_count=0;
+
 			sleep(10);
 		}
 
 		//terminate base station if all slavo processes ended -> the alert are all processed
-		MPI_Iprobe(slaCount, SLATAG, MPI_COMM_WORLD, &slaFlag, &status);
+		MPI_Iprobe(MPI_ANY_SOURCE, SLATAG, MPI_COMM_WORLD, &slaFlag, &status);
 		if(slaFlag)
-		{	
-			int sla;
-			MPI_Recv(&sla, 1, MPI_INT, slaCount, SLATAG, MPI_COMM_WORLD,&status);
+		{	int sla;
+			MPI_Recv(&sla, 1, MPI_INT, MPI_ANY_SOURCE, SLATAG, MPI_COMM_WORLD,&status);
 			slaCount++;
+			// printf("term for base station");
+			// fflush(stdout);
 		}
 
 	}
@@ -405,8 +440,8 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 	
 	MPI_Dims_create(size, ndims, dims);
 
-	if(my_rank==0)
-	printf("Slave Rank: %d. Comm Size: %d: Grid Dimension = [%d x %d] \n",my_rank,size,dims[0],dims[1]);
+	//if(my_rank==0)
+	//printf("Slave Rank: %d. Comm Size: %d: Grid Dimension = [%d x %d] \n",my_rank,size,dims[0],dims[1]);
 
     /* create cartesian mapping */
 	MPI_Comm comm2D;
@@ -465,7 +500,7 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 			
 			int result = pthread_create(&node.threads[i], NULL, node_func, (void *)n_func); 
 			if(result == 0){
-				printf("Thread created successfully.");
+				//printf("Thread created successfully.");
 			}
 		}	
 	}
@@ -476,22 +511,16 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 	int itself; //,up, down, left, right;
 	int data[ADJ];
 	// MPI_Comm world_comm, comm2D;
-	MPI_Status status[NODES];
-	MPI_Request req[NODES];
-
-	// nodefunc_t *node_func = (nodefunc_t *)arg;
-	// world_comm = node_func -> world;
-	// comm2D = node_func -> comm2D;
-	// node_t* node = node_func -> node; // Change to pointer to node_t
-
-	printf("\n node rank: %d \n", node.rank); // Access members via pointer
-	// MPI_Comm_size(world_comm, &worldSize);
+	//Do not use req[NODES] use [worldSize-1] to scalable to different size 3x3, 4x4, 5x5
+	//use the tag to for specific type of send
+	MPI_Status status[worldSize-1];
+	MPI_Request req[worldSize-1];
 
 	//printf("\n rank: %d coordinates: [%d, %d]\n",node.rank, coord[0], coord[1]);
 
 	//send coordinates to base stations
 	MPI_Isend(coord, 2, MPI_INT, worldSize-1, node.rank, MPI_COMM_WORLD, &req[5]); // Access members via pointer
-	printf("\n rank: %d [%d,%d] send coordinates to %d",node.rank, node.x, node.y, worldSize-1); // Access members via pointer
+	//printf("\n rank: %d [%d,%d] send coordinates to %d",node.rank, node.x, node.y, worldSize-1); // Access members via pointer
 	//wait until and send finish
 	MPI_Wait(&req[5], MPI_STATUS_IGNORE);
 	
@@ -499,7 +528,7 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 	MPI_Cart_shift(comm2D, 0, 1, &data[0], &data[1]);
 	MPI_Cart_shift(comm2D, 1, 1, &data[2], &data[3]); 
 
-	printf("\n all directions: up: %d, down: %d, left: %d, right: %d \n", data[0], data[1], data[2], data[3]);
+	//printf("\n all directions: up: %d, down: %d, left: %d, right: %d \n", data[0], data[1], data[2], data[3]);
 
 	//count for while loop
 	int count = 0;
@@ -550,16 +579,13 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 				//MPI_PROC_NULL  = -2
 				if (data[i] != MPI_PROC_NULL )
 				{
-					
-					
 					//do following Recv for the Send if need to get immediate reponse
 					MPI_Send(&node.rank, 1, MPI_INT, data[i], REQTAG, comm2D); // Access members via pointer
-					printf("\n %d send request to: %d \n", node.rank, data[i]);
-					fflush(stdout);
+					// printf("\n %d send request to: %d \n", node.rank, data[i]);
+					// fflush(stdout);
 					MPI_Recv(&vacant_data[i], 1, MPI_INT, data[i], RESTAG, comm2D, &status[data[i]]);
-					printf("\n %d receive response from: %d \n", node.rank, data[i]);
-					//printf("\n rank: %d %s to %d \n", node->rank, "sent request", data[i]); 
-					fflush(stdout);
+					// printf("\n %d receive response from: %d \n", node.rank, data[i]);
+					// fflush(stdout);
 
 					//increament vacancies accordingly;
 					vacancies+=vacant_data[i];
@@ -581,13 +607,13 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 				//printf("\n rank: %d, node: %d\n", node.rank, a.nodes[i]);
 			}
 			
-			printf("check vacancies: %d",vacancies);
-			fflush(stdout);
+			//printf("check vacancies: %d",vacancies);
+
 
 			char inMsg[256];
 			time_t t = time(NULL);
 			char* time_str = ctime(&t);
-			sprintf(inMsg, "\n On %s Vacant Neighbour Nodes: ", time_str);
+			sprintf(inMsg, "\n On %s Vacant Neighbour Nodes: ", "");
 			//if there is vacant neigoubour show it
 			if (vacancies > 0)
 			{
@@ -597,15 +623,15 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 						char str[256];
 						sprintf(str, " %d ", data[i]);
 						strcat(inMsg, str);
-
 					}
 				}
 				printf("%s", inMsg);
 				fflush(stdout);
 			}
+			
 
 			//if itself and neighbours are not vancant alert base station
-			if (vacancies <= 0)
+			else 
 			{
 				MPI_Datatype MPI_ALERT_T;
 				//create corresponding MPI_Type for MPI_Send
@@ -634,24 +660,16 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 					}
 				}
 
-				printf("\n rank: %d sent alert message  %s\n", node.rank, a.alert_msg);
-				fflush(stdout);
 				//send the struct     
 				int test = 1;                            //output argument that are refreshed
 				MPI_Send(&a, 1, MPI_ALERT_T, worldSize-1, ALETAG, MPI_COMM_WORLD);
-				//MPI_Wait(&req[5], MPI_STATUS_IGNORE);
-				//MPI_Isend(&a, 1, alert_type, worldSize-1, 0, world_comm, &req);
-				//printf("\n%s\n", "sent alert");
 				
 				//Nearst rank
-				int nearest[3];
-				//receive information about the nearest node
-				//so need to wait for the base station
-				printf("about to MPI_RECV");
-				MPI_Recv(nearest, 3, MPI_INT, worldSize-1, NEATAG, MPI_COMM_WORLD,&status[4]);
-				// int ne_coord[2];
-				// MPI_Cart_coords(comm2D, nearest, 2, ne_coord); 
-				printf("Nearest Node with rank: %d, at [%d,%d]", nearest[0], nearest[1],nearest[2]);
+				char nearbyStr[256];
+
+				//printf("about to MPI_RECV");
+				MPI_Recv(nearbyStr, 256, MPI_CHAR, worldSize-1, NEATAG, MPI_COMM_WORLD,&status[4]);
+				printf("%s",nearbyStr);
 				fflush(stdout);
 			}
 			
@@ -662,8 +680,8 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 			whileFlag=0;
 			MPI_Recv(&msg, 1, MPI_INT, worldSize-1, TEMTAG, MPI_COMM_WORLD, &status[0]);
 			//terminate msg received: should print once for every process, 4 for 4 slave processors
-			printf("rank: %d, terminate msg received: %d", node.rank, msg);
-			fflush(stdout);
+			// printf("rank: %d, terminate msg received: %d", node.rank, msg);
+			// fflush(stdout);
 			break;
 				//terminate
 		}
@@ -674,10 +692,9 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 	//to terminate while loop in node_func
 	//wait 20 seconds so can respond all the request before close
 	//change from 1 to 0
-	for(int i=0; i<2; i++){
-		sleep(10);
-	}
 
+	//wait for all mpi processes in MPI_World to reach here
+	MPI_Barrier(comm2D);
 	//since the attribute is passed with pointer
 	//change the value of the address after sleeping time
 	n_func -> term = 0;
@@ -686,13 +703,17 @@ int slave_io(MPI_Comm world_comm, MPI_Comm comm, int nrows, int ncols)
 	{	// wait for all port threads to finish
 		pthread_join(node.threads[i], NULL); 
 	}
+
 	pthread_mutex_destroy(&node.mutex); // destroy the mutex
+	free(n_func);
 
 	//Notify base station that the slave processes are all shutdown
 	//MPI_Isend(&vacancies, 1, MPI_INT, source, RESTAG, comm2D, &req);
 	int slaveTerm = -10;
-	MPI_Isend(&slaveTerm, 1, MPI_INT, worldSize-1, SLATAG, MPI_COMM_WORLD, &req[node.rank]);
-	MPI_Wait(&req[node.rank], MPI_STATUS_IGNORE);
+	MPI_Isend(&slaveTerm, 1, MPI_INT, worldSize-1, SLATAG, MPI_COMM_WORLD, &req[0]);
+	MPI_Wait(&req[0], MPI_STATUS_IGNORE);
+	// printf("send back termianation msg");
+	// fflush(stdout);
 }	
 
 
@@ -708,7 +729,7 @@ void *node_func(void *arg){
 	nodefunc_t *node_func = (nodefunc_t *)arg;
 	world_comm = node_func -> world;
 	comm2D = node_func -> comm2D;
-	node_t* node = node_func -> node; // Change to pointer to node_t
+	//node_t* node = node_func -> node; // Change to pointer to node_t
 
 	//printf("\n node rank: %d \n", node->rank); // Access members via pointer
 	MPI_Comm_size(world_comm, &worldSize);
@@ -730,22 +751,23 @@ void *node_func(void *arg){
 			//store the request process to the source
 			//receive the requestion from other processews
 			MPI_Recv(&source, 1, MPI_INT, status.MPI_SOURCE, REQTAG, comm2D, &status);
-			printf("\n rank: %d Inside received request from %d \n", node->rank, source);
-			fflush(stdout);
+			//printf("\n rank: %d Inside received request from %d \n", node->rank, source);
+			// fflush(stdout);
 					
 			//calculate its own vacancy from the its ports
 			int vacancies = 0;
 			for (int i=0; i<K; i++)
 			{
-				if(node->ports[i] ==1)
+				if(node_func -> node ->ports[i] ==1)
 				{ 
 					vacancies++;
 				}
 			}	
 			//send back the reponse to the source of request
 			MPI_Isend(&vacancies, 1, MPI_INT, source, RESTAG, comm2D, &req);
-			printf("rank: %d send back response to %d", node->rank, source);
 			MPI_Wait(&req, MPI_STATUS_IGNORE);
+			// printf("rank: %d send back response to %d", node->rank, source);
+			// fflush(stdout);
 		}
 		
 	}
@@ -779,7 +801,12 @@ void *port_func(void *arg)
     for(int i= 0; i < sizeof(port->node->ports)/sizeof(port->node->ports[0]); i++)
 	{
 		// // //Randomly set availability to 0 or 1, but mostly 0
-        port->node->ports[i] = (rand() % 10 < 9) ? 0 : 1; 
+		int ranInt = 0;
+		ranInt = rand() % 10;
+		//printf("random Int: %d", ranInt);
+        port->node->ports[i] = (ranInt < 9) ? 0 : 1; 
+		//printf("port: %d", port->node->ports[i]);
+		fflush(stdout);
 		
 	}
     pthread_mutex_unlock(&port->node->mutex);
